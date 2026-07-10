@@ -43,4 +43,9 @@ TOOLBAR_BG = "rgba(28, 28, 32, 220)"
 TOOLBAR_ACCENT = "#5c9dff"
 TOOLBAR_TEXT = "#f0f0f0"
 
+# --- Темы оформления ---
+STYLE_CLASSIC = "classic"
+STYLE_CALLIGRAPHY = "calligraphy"
+DEFAULT_STYLE = STYLE_CLASSIC
+
 # Биндинги по умолчанию и их пользовательские переопределения — см. overlay/keymap.py

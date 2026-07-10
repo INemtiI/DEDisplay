@@ -6,7 +6,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from overlay import keymap
+from overlay import keymap, style_prefs
 from overlay.canvas import OverlayCanvas
 from overlay.hotkeys import HotkeyManager
 from overlay.page_switcher import PageSwitcher
@@ -54,7 +54,17 @@ def main() -> None:
             canvas.hide()
             toolbar.hide()
             page_switcher.hide()
+            # снимаем регистрацию остальных глобальных хоткеев на уровне ОС,
+            # иначе RegisterHotKey продолжает эксклюзивно перехватывать их
+            # комбинации (например Ctrl+Space) и они не доходят до других
+            # приложений, даже если сам обработчик их игнорирует
+            for name in keymap.get_global_bindings():
+                if name != keymap.HIDE_ALL:
+                    hotkeys.unregister(name)
         else:
+            for name, (mod, vk) in keymap.get_global_bindings().items():
+                if name != keymap.HIDE_ALL:
+                    hotkeys.register_one(name, mod, vk)
             canvas.show()
             toolbar.show()
             page_switcher.show()
@@ -85,8 +95,23 @@ def main() -> None:
     tray.toggle_ui_requested.connect(toggle_ui)
     tray.quit_requested.connect(app.quit)
 
+    # --- выбор стиля оформления ---
+    def apply_style(style: str) -> None:
+        toolbar.set_style(style)
+        page_switcher.set_style(style)
+        tray.set_style(style)
+
+    def on_style_selected(style: str) -> None:
+        apply_style(style)
+        style_prefs.save_style(style)
+
+    tray.style_selected.connect(on_style_selected)
+    apply_style(style_prefs.load_style())
+
     # --- глобальные хоткеи ---
     def on_hotkey(name: str) -> None:
+        if hidden_all and name != keymap.HIDE_ALL:
+            return
         if name == keymap.TOGGLE_DRAW:
             canvas.toggle_draw_mode()
         elif name == keymap.TOGGLE_UI or name == keymap.TOGGLE_UI_SPACE:

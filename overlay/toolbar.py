@@ -2,24 +2,128 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+import time
+
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QPushButton, QSlider, QWidget
+from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QSlider, QWidget
 
-from . import config
+from . import calligraphy, config
+from .ornate_button import OrnateButton
 
+# монохромные глифы (без emoji-варианта), чтобы текст рисовался золотой тушью
 _TOOL_LABELS = {
-    config.TOOL_PEN: "✏",  # ✏
-    config.TOOL_ERASER: "⌫",  # ⌫
-    config.TOOL_MOVE: "✋",  # ✋
+    config.TOOL_PEN: "✎",   # карандаш
+    config.TOOL_ERASER: "⌫",  # стереть
+    config.TOOL_MOVE: "✥",   # перемещение
 }
 
+# отступы содержимого панели
+_CLASSIC_MARGINS = (14, 10, 14, 10)
+_CALLIG_PAD = 12  # зазор между рамкой и кнопками
 
-def _separator() -> QFrame:
-    line = QFrame()
-    line.setFrameShape(QFrame.VLine)
-    line.setStyleSheet("color: rgba(255,255,255,40);")
-    return line
+
+class InkSeparator(QWidget):
+    """Разделитель: тонкая линия в классике, рукописный штрих в каллиграфии."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._style = config.STYLE_CLASSIC
+        self.setFixedWidth(10)
+
+    def set_style(self, style: str) -> None:
+        self._style = style
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect())
+        if self._style == config.STYLE_CALLIGRAPHY:
+            h = rect.height() * 0.7
+            dr = QRectF(rect.center().x() - 5, rect.center().y() - h / 2, 10, h)
+            calligraphy.draw_divider(painter, dr)
+        else:
+            painter.setPen(QColor(255, 255, 255, 40))
+            cx = rect.center().x()
+            painter.drawLine(cx, rect.y() + 6, cx, rect.bottom() - 6)
+
+
+class ColorWell(QPushButton):
+    """Чернильница: цветной блик + рукописное золотое кольцо при выборе/наведении."""
+
+    def __init__(self, color: QColor, parent=None):
+        super().__init__(parent)
+        self._color = color
+        self._style = config.STYLE_CLASSIC
+        self._selected = False
+        self._progress = 0.0
+        self.setCheckable(True)
+        self.setFixedSize(22, 22)
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._on_tick)
+
+    def color(self) -> QColor:
+        return self._color
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.setChecked(selected)
+        if self._style == config.STYLE_CALLIGRAPHY:
+            self.update()
+
+    def set_style(self, style: str) -> None:
+        self._style = style
+        if style == config.STYLE_CALLIGRAPHY:
+            self.setStyleSheet("background: transparent; border: none;")
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._progress = 0.0
+        self.update()
+
+    def _on_tick(self) -> None:
+        target = 1.0 if (self._selected or self.underMouse()) else 0.0
+        self._progress += (target - self._progress) * 0.28
+        if abs(target - self._progress) < 0.002:
+            self._progress = target
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self._style != config.STYLE_CALLIGRAPHY:
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect())
+        # органичная капля туши выбранного цвета
+        blob = min(rect.width(), rect.height()) * (0.5 if self._selected or self.underMouse() else 0.46)
+        center = rect.center()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(center, blob / 2, blob / 2 * 0.92)
+        # рукописное кольцо
+        ring_rect = rect.adjusted(1, 1, -1, -1)
+        progress = max(self._progress, 1.0 if self._selected else 0.0)
+        calligraphy.draw_well_ring(painter, ring_rect, progress)
+
+
+def _slider_stylesheet(style: str) -> str:
+    if style != config.STYLE_CALLIGRAPHY:
+        return ""
+    return f"""
+        QSlider::groove:horizontal {{
+            background: rgba(210,169,94,40); height: 2px; border-radius: 1px;
+        }}
+        QSlider::sub-page:horizontal {{
+            background: rgba(210,169,94,140); height: 2px; border-radius: 1px;
+        }}
+        QSlider::handle:horizontal {{
+            background: {calligraphy.GOLD_BRIGHT}; width: 13px; height: 13px;
+            margin: -6px 0; border-radius: 6px; border: 1px solid {calligraphy.GOLD};
+        }}
+    """
 
 
 class Toolbar(QWidget):
@@ -36,48 +140,63 @@ class Toolbar(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self._color_buttons: list[tuple[QColor, QPushButton]] = []
+        self._style = config.STYLE_CLASSIC
+        self._selected_color = config.DEFAULT_COLOR
+        self._color_wells: list[ColorWell] = []
         self._tool_buttons: dict[str, QPushButton] = {}
+        self._ornate_buttons: list[OrnateButton] = []
+        self._separators: list[InkSeparator] = []
         self._drag_offset = None
+        self._anim_start = time.monotonic()
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(33)
+        self._anim_timer.timeout.connect(self.update)
+
         self._build_ui()
         self._position()
 
+    def _add_separator(self, layout) -> None:
+        sep = InkSeparator()
+        self._separators.append(sep)
+        layout.addWidget(sep)
+
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(*_CLASSIC_MARGINS)
         layout.setSpacing(8)
 
-        self.draw_toggle_btn = QPushButton("● Рисование")
+        self.draw_toggle_btn = OrnateButton("● Рисование", tier="full")
         self.draw_toggle_btn.setCheckable(True)
         self.draw_toggle_btn.clicked.connect(self.toggle_draw_mode_requested)
+        self._ornate_buttons.append(self.draw_toggle_btn)
         layout.addWidget(self.draw_toggle_btn)
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
         tool_group = QButtonGroup(self)
         tool_group.setExclusive(True)
         for tool, label in _TOOL_LABELS.items():
-            btn = QPushButton(label)
+            btn = OrnateButton(label, tier="mini")
             btn.setCheckable(True)
-            btn.setFixedWidth(34)
+            btn.setFixedWidth(36)
             btn.clicked.connect(lambda _checked, t=tool: self.tool_selected.emit(t))
             tool_group.addButton(btn)
             self._tool_buttons[tool] = btn
+            self._ornate_buttons.append(btn)
             layout.addWidget(btn)
         self._tool_buttons[config.DEFAULT_TOOL].setChecked(True)
         self._tool_group = tool_group
 
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
         for color in config.PALETTE:
-            btn = QPushButton()
-            btn.setCheckable(True)
-            btn.setFixedSize(20, 20)
-            btn.clicked.connect(lambda _checked, c=color: self._on_color_clicked(c))
-            self._color_buttons.append((color, btn))
-            layout.addWidget(btn)
+            well = ColorWell(color)
+            well.clicked.connect(lambda _checked, c=color: self._on_color_clicked(c))
+            self._color_wells.append(well)
+            layout.addWidget(well)
         self._refresh_color_buttons(config.DEFAULT_COLOR)
 
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
         self.width_slider = QSlider(Qt.Horizontal)
         self.width_slider.setMinimum(int(config.MIN_BRUSH_WIDTH))
@@ -87,30 +206,37 @@ class Toolbar(QWidget):
         self.width_slider.valueChanged.connect(lambda v: self.brush_width_changed.emit(float(v)))
         layout.addWidget(self.width_slider)
 
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
-        self.undo_btn = QPushButton("↶")
+        self.undo_btn = OrnateButton("↶", tier="mini")
         self.undo_btn.setEnabled(False)
         self.undo_btn.clicked.connect(self.undo_requested)
+        self._ornate_buttons.append(self.undo_btn)
         layout.addWidget(self.undo_btn)
 
-        self.redo_btn = QPushButton("↷")
+        self.redo_btn = OrnateButton("↷", tier="mini")
         self.redo_btn.setEnabled(False)
         self.redo_btn.clicked.connect(self.redo_requested)
+        self._ornate_buttons.append(self.redo_btn)
         layout.addWidget(self.redo_btn)
 
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
-        self.clear_btn = QPushButton("🗑")
+        self.clear_btn = OrnateButton("✕", tier="mini")
         self.clear_btn.clicked.connect(self.clear_page_requested)
+        self._ornate_buttons.append(self.clear_btn)
         layout.addWidget(self.clear_btn)
 
-        layout.addWidget(_separator())
+        self._add_separator(layout)
 
-        self.add_page_btn = QPushButton("+ страница")
+        self.add_page_btn = OrnateButton("+ страница", tier="full")
         self.add_page_btn.clicked.connect(self.add_page_requested)
+        self._ornate_buttons.append(self.add_page_btn)
         layout.addWidget(self.add_page_btn)
 
+        self._apply_classic_stylesheet()
+
+    def _apply_classic_stylesheet(self) -> None:
         self.setStyleSheet(
             f"""
             QPushButton {{
@@ -131,26 +257,74 @@ class Toolbar(QWidget):
         self.color_selected.emit(color)
 
     def _refresh_color_buttons(self, selected_color: QColor) -> None:
-        # цвет фона задаётся инлайн-стилем на каждой кнопке, поэтому подсветку
-        # выбранного цвета нужно перерисовывать вручную через border, а не
-        # полагаться на QPushButton:checked из общего стиля панели
-        for c, btn in self._color_buttons:
-            selected = c == selected_color
-            btn.setChecked(selected)
-            border = f"3px solid {config.TOOLBAR_ACCENT}" if selected else "1px solid rgba(255,255,255,60)"
-            btn.setStyleSheet(
-                f"background-color: {c.name()}; border-radius: 10px; border: {border};"
-            )
+        self._selected_color = selected_color
+        calligraphy_mode = self._style == config.STYLE_CALLIGRAPHY
+        for well in self._color_wells:
+            selected = well.color() == selected_color
+            well.set_selected(selected)
+            if not calligraphy_mode:
+                ring = config.TOOLBAR_ACCENT
+                border = f"3px solid {ring}" if selected else "1px solid rgba(255,255,255,60)"
+                well.setStyleSheet(
+                    f"background-color: {well.color().name()}; border-radius: 11px; border: {border};"
+                )
 
     def set_color(self, color: QColor) -> None:
         self._refresh_color_buttons(color)
 
+    def set_style(self, style: str) -> None:
+        if style == self._style:
+            return
+        self._style = style
+        for btn in self._ornate_buttons:
+            btn.set_style(style)
+        for sep in self._separators:
+            sep.set_style(style)
+        for well in self._color_wells:
+            well.set_style(style)
+        self.width_slider.setStyleSheet(_slider_stylesheet(style))
+        if style == config.STYLE_CLASSIC:
+            self._apply_classic_stylesheet()
+            self._anim_timer.stop()
+            self.layout().setContentsMargins(*_CLASSIC_MARGINS)
+        else:
+            self.setStyleSheet("")  # каллиграфические кнопки рисуют себя сами
+            self._anim_start = time.monotonic()
+            self._anim_timer.start()
+            self._apply_calligraphy_layout()
+        self._refresh_color_buttons(self._selected_color)
+        self.adjustSize()
+        self._position()
+        self.update()
+
+    def _apply_calligraphy_layout(self) -> None:
+        layout = self.layout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.activate()
+        hint = layout.sizeHint()
+        mx, my = calligraphy.layout_margins(
+            hint.width(), hint.height(),
+            calligraphy.FRAME_LARGE_VIEWBOX, calligraphy.FRAME_LARGE_BOX, pad=_CALLIG_PAD,
+        )
+        layout.setContentsMargins(mx, my, mx, my)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._style == config.STYLE_CALLIGRAPHY:
+            self._anim_start = time.monotonic()  # проиграть прорисовку заново
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(28, 28, 32, 220))
-        painter.drawRoundedRect(self.rect(), 14, 14)
+        rect = QRectF(self.rect())
+        if self._style == config.STYLE_CALLIGRAPHY:
+            # фон прозрачный — рисуем только золотую рамку и орнамент
+            elapsed = time.monotonic() - self._anim_start
+            calligraphy.draw_frame_large(painter, rect.adjusted(2, 2, -2, -2), elapsed)
+        else:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(28, 28, 32, 220))
+            painter.drawRoundedRect(rect, 14, 14)
 
     def _position(self) -> None:
         self.adjustSize()

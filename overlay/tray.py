@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from . import config
@@ -13,6 +13,7 @@ class TrayIcon(QSystemTrayIcon):
     toggle_draw_mode_requested = Signal()
     toggle_ui_requested = Signal()
     settings_requested = Signal()
+    style_selected = Signal(str)
     quit_requested = Signal()
 
     def __init__(self, parent=None):
@@ -28,6 +29,21 @@ class TrayIcon(QSystemTrayIcon):
         toggle_ui_action = QAction("Показать/скрыть панель", menu)
         toggle_ui_action.triggered.connect(lambda: self.toggle_ui_requested.emit())
         menu.addAction(toggle_ui_action)
+
+        style_menu = menu.addMenu("Стиль оформления")
+        self._style_actions: dict[str, QAction] = {}
+        style_group = QActionGroup(self)
+        style_group.setExclusive(True)
+        for style, label in (
+            (config.STYLE_CLASSIC, "Классический"),
+            (config.STYLE_CALLIGRAPHY, "Каллиграфический"),
+        ):
+            action = QAction(label, style_menu)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked, s=style: self.style_selected.emit(s))
+            style_group.addAction(action)
+            style_menu.addAction(action)
+            self._style_actions[style] = action
 
         settings_action = QAction("Настройки клавиш…", menu)
         settings_action.triggered.connect(lambda: self.settings_requested.emit())
@@ -47,6 +63,11 @@ class TrayIcon(QSystemTrayIcon):
 
     def set_draw_mode(self, enabled: bool) -> None:
         self.draw_action.setChecked(enabled)
+
+    def set_style(self, style: str) -> None:
+        action = self._style_actions.get(style)
+        if action is not None:
+            action.setChecked(True)
 
     @staticmethod
     def _make_icon() -> QIcon:
