@@ -24,6 +24,14 @@ _CURSORS = {
     config.TOOL_MOVE: Qt.SizeAllCursor,
 }
 
+# курсоры для ручек изменения размера выделения (по положению ручки на рамке)
+_HANDLE_CURSORS = {
+    ("l", "t"): Qt.SizeFDiagCursor, ("r", "b"): Qt.SizeFDiagCursor,
+    ("r", "t"): Qt.SizeBDiagCursor, ("l", "b"): Qt.SizeBDiagCursor,
+    ("c", "t"): Qt.SizeVerCursor, ("c", "b"): Qt.SizeVerCursor,
+    ("l", "m"): Qt.SizeHorCursor, ("r", "m"): Qt.SizeHorCursor,
+}
+
 # Qt's WA_TransparentForMouseEvents не всегда надёжно переприменяется "на лету"
 # для уже показанного полноэкранного frameless-окна на Windows, поэтому
 # click-through дополнительно принудительно выставляется через WinAPI.
@@ -43,6 +51,8 @@ class OverlayCanvas(QWidget):
     tool_changed = Signal(str)
     color_changed = Signal(QColor)
     brush_width_changed = Signal(float)
+    selection_changed = Signal(bool)  # есть ли выделенные штрихи
+    clipboard_changed = Signal(bool)  # есть ли что вставлять из буфера
 
     def __init__(self, page_manager: PageManager, parent=None):
         super().__init__(parent)
@@ -62,6 +72,16 @@ class OverlayCanvas(QWidget):
         self._select_start: QPointF | None = None
         self._select_current: QPointF | None = None
         self._moving_selection = False
+
+        # --- изменение размера выделения за ручку ---
+        self._resizing = False
+        self._resize_handle: tuple[str, str] | None = None
+        self._resize_bounds: QRectF | None = None
+        # снимок геометрии на момент начала масштабирования: [(stroke, [точки], ширина)]
+        self._resize_orig: list[tuple[Stroke, list[QPointF], float]] = []
+
+        # --- буфер обмена штрихов (живёт на канвасе -> работает между страницами) ---
+        self._clipboard: list[Stroke] = []
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -121,6 +141,9 @@ class OverlayCanvas(QWidget):
             "color_white": lambda: self.set_color(config.COLOR_WHITE),
             "clear_page": self.clear_page,
             "exit_draw_mode": lambda: self.set_draw_mode(False),
+            "delete_selection": self.delete_selection,
+            "copy": self.copy_selection,
+            "paste": self.paste_clipboard,
         }
         for action in keymap.LOCAL_ACTIONS:
             sc = QShortcut(QKeySequence(keymap.current_qt_text(action.id)), self)
@@ -211,10 +234,53 @@ class OverlayCanvas(QWidget):
         self.update()
 
     def _clear_selection(self) -> None:
-        self._selected_strokes = []
         self._select_start = None
         self._select_current = None
         self._moving_selection = False
+        self._resizing = False
+        self._resize_handle = None
+        self._resize_orig = []
+        self._set_selection([])
+
+    def _set_selection(self, strokes: list[Stroke]) -> None:
+        self._selected_strokes = strokes
+        self.selection_changed.emit(bool(strokes))
+
+    # --- удаление / буфер обмена выделения ---
+    def delete_selection(self) -> None:
+        if not self._selected_strokes:
+            return
+        page = self.page_manager.current_page
+        page.snapshot()
+        marked = {id(s) for s in self._selected_strokes}
+        page.strokes = [s for s in page.strokes if id(s) not in marked]
+        self._clear_selection()
+        self._emit_history()
+        self.update()
+
+    def copy_selection(self) -> None:
+        if not self._selected_strokes:
+            return
+        self._clipboard = [s.copy() for s in self._selected_strokes]
+        self.clipboard_changed.emit(True)
+
+    def paste_clipboard(self) -> None:
+        if not self._clipboard:
+            return
+        # выделение видно и редактируется только инструментом "перемещение"
+        if self.tool != config.TOOL_MOVE:
+            self.set_tool(config.TOOL_MOVE)
+        page = self.page_manager.current_page
+        page.snapshot()
+        pasted: list[Stroke] = []
+        for stroke in self._clipboard:
+            clone = stroke.copy()
+            clone.translate(config.PASTE_OFFSET, config.PASTE_OFFSET)
+            page.strokes.append(clone)
+            pasted.append(clone)
+        self._set_selection(pasted)
+        self._emit_history()
+        self.update()
 
     # --- общая логика указателя (мышь и перо планшета) ---
     def _begin_stroke(self, pos: QPointF, pressure: float) -> None:
@@ -233,7 +299,9 @@ class OverlayCanvas(QWidget):
         elif self.tool == config.TOOL_ERASER:
             self._erase_at(pos)
         elif self.tool == config.TOOL_MOVE:
-            if self._moving_selection and self._drag_last_pos is not None:
+            if self._resizing:
+                self._apply_resize(pos)
+            elif self._moving_selection and self._drag_last_pos is not None:
                 dx = pos.x() - self._drag_last_pos.x()
                 dy = pos.y() - self._drag_last_pos.y()
                 for stroke in self._selected_strokes:
@@ -253,7 +321,13 @@ class OverlayCanvas(QWidget):
             self._emit_history()
             self.update()
         elif self.tool == config.TOOL_MOVE:
-            if self._moving_selection:
+            if self._resizing:
+                self._resizing = False
+                self._resize_handle = None
+                self._resize_orig = []
+                self._drag_last_pos = None
+                self._emit_history()
+            elif self._moving_selection:
                 self._moving_selection = False
                 self._drag_last_pos = None
                 self._emit_history()
@@ -268,7 +342,12 @@ class OverlayCanvas(QWidget):
         self._begin_stroke(event.position(), 1.0)
 
     def mouseMoveEvent(self, event) -> None:
-        if not self.draw_mode or not self._pointer_down:
+        if not self.draw_mode:
+            return
+        if not self._pointer_down:
+            # без нажатия — подсказываем курсором, что можно потянуть за ручку
+            if self.tool == config.TOOL_MOVE:
+                self._update_hover_cursor(event.position())
             return
         self._continue_stroke(event.position(), 1.0)
 
@@ -310,20 +389,29 @@ class OverlayCanvas(QWidget):
 
     def _start_move(self, pos: QPointF) -> None:
         page = self.page_manager.current_page
+        # 1) ручка на рамке выделения -> изменение размера
+        if self._selected_strokes:
+            handle = self._handle_at(pos)
+            if handle is not None:
+                self._begin_resize(handle, pos, page)
+                return
+        # 2) клик по уже выделенному -> перемещение группы
         if any(stroke.hit_test(pos) for stroke in self._selected_strokes):
             page.snapshot()
             self._moving_selection = True
             self._drag_last_pos = pos
             return
+        # 3) клик по штриху -> выделить его и двигать
         for stroke in reversed(page.strokes):
             if stroke.hit_test(pos):
-                self._selected_strokes = [stroke]
+                self._set_selection([stroke])
                 page.snapshot()
                 self._moving_selection = True
                 self._drag_last_pos = pos
                 self.update()
                 return
-        self._selected_strokes = []
+        # 4) пустое место -> рамка выделения
+        self._set_selection([])
         self._select_start = pos
         self._select_current = pos
 
@@ -332,8 +420,89 @@ class OverlayCanvas(QWidget):
         self._select_start = None
         self._select_current = None
         page = self.page_manager.current_page
-        self._selected_strokes = [s for s in page.strokes if rect.intersects(s.bounding_rect())]
+        self._set_selection([s for s in page.strokes if rect.intersects(s.bounding_rect())])
         self.update()
+
+    # --- изменение размера выделения ---
+    def _selection_bounds(self) -> QRectF | None:
+        if not self._selected_strokes:
+            return None
+        rect = QRectF(self._selected_strokes[0].bounding_rect())
+        for stroke in self._selected_strokes[1:]:
+            rect = rect.united(stroke.bounding_rect())
+        return rect
+
+    @staticmethod
+    def _handle_points(bounds: QRectF) -> dict[tuple[str, str], QPointF]:
+        left, right = bounds.left(), bounds.right()
+        top, bottom = bounds.top(), bounds.bottom()
+        cx, cy = bounds.center().x(), bounds.center().y()
+        return {
+            ("l", "t"): QPointF(left, top), ("c", "t"): QPointF(cx, top), ("r", "t"): QPointF(right, top),
+            ("l", "m"): QPointF(left, cy), ("r", "m"): QPointF(right, cy),
+            ("l", "b"): QPointF(left, bottom), ("c", "b"): QPointF(cx, bottom), ("r", "b"): QPointF(right, bottom),
+        }
+
+    def _handle_at(self, pos: QPointF) -> tuple[str, str] | None:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return None
+        hit = config.SELECTION_HANDLE_HIT
+        for key, pt in self._handle_points(bounds).items():
+            if abs(pos.x() - pt.x()) <= hit and abs(pos.y() - pt.y()) <= hit:
+                return key
+        return None
+
+    def _begin_resize(self, handle: tuple[str, str], pos: QPointF, page) -> None:
+        bounds = self._selection_bounds()
+        if bounds is None:
+            return
+        page.snapshot()
+        self._resizing = True
+        self._resize_handle = handle
+        self._resize_bounds = bounds
+        self._resize_orig = [(s, [QPointF(p) for p in s.points], s.width) for s in self._selected_strokes]
+        self._drag_last_pos = pos
+
+    def _apply_resize(self, pos: QPointF) -> None:
+        bounds = self._resize_bounds
+        hx, hy = self._resize_handle
+        left, right, top, bottom = bounds.left(), bounds.right(), bounds.top(), bounds.bottom()
+
+        # неподвижная сторона (anchor) — противоположная той, что тянем
+        if hx == "l":
+            ax, moving_x = right, left
+        elif hx == "r":
+            ax, moving_x = left, right
+        else:  # "c" — по горизонтали не масштабируем
+            ax, moving_x = left, None
+        sx = (pos.x() - ax) / (moving_x - ax) if moving_x is not None and moving_x != ax else 1.0
+
+        if hy == "t":
+            ay, moving_y = bottom, top
+        elif hy == "b":
+            ay, moving_y = top, bottom
+        else:  # "m" — по вертикали не масштабируем
+            ay, moving_y = top, None
+        sy = (pos.y() - ay) / (moving_y - ay) if moving_y is not None and moving_y != ay else 1.0
+
+        # толщину линии тянем пропорционально: для угла — среднее осей, для стороны — по её оси
+        if moving_x is not None and moving_y is not None:
+            width_factor = (abs(sx) + abs(sy)) / 2
+        else:
+            width_factor = abs(sx) if moving_x is not None else abs(sy)
+
+        for stroke, orig_points, orig_width in self._resize_orig:
+            stroke.points = [QPointF(ax + (p.x() - ax) * sx, ay + (p.y() - ay) * sy) for p in orig_points]
+            stroke.width = max(config.MIN_BRUSH_WIDTH, min(config.MAX_BRUSH_WIDTH, orig_width * width_factor))
+        self.update()
+
+    def _update_hover_cursor(self, pos: QPointF) -> None:
+        handle = self._handle_at(pos) if self._selected_strokes else None
+        if handle is not None:
+            self.setCursor(QCursor(_HANDLE_CURSORS[handle]))
+        else:
+            self.setCursor(QCursor(_CURSORS.get(self.tool, Qt.ArrowCursor)))
 
     # --- отрисовка ---
     def paintEvent(self, event) -> None:
@@ -355,18 +524,34 @@ class OverlayCanvas(QWidget):
         painter.end()
 
     def _draw_selection(self, painter: QPainter) -> None:
-        pen = QPen(QColor(config.TOOLBAR_ACCENT), 1, Qt.DashLine)
+        accent = QColor(config.TOOLBAR_ACCENT)
+        pen = QPen(accent, 1, Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         for stroke in self._selected_strokes:
             painter.drawRect(stroke.bounding_rect())
+
+        # активная рамка выделения (протягивание) — без ручек
         if self._select_start is not None and self._select_current is not None:
             rect = QRectF(self._select_start, self._select_current).normalized()
-            fill_color = QColor(config.TOOLBAR_ACCENT)
+            fill_color = QColor(accent)
             fill_color.setAlpha(40)
             painter.fillRect(rect, fill_color)
             painter.setPen(pen)
             painter.drawRect(rect)
+            return
+
+        # общая рамка выделения с ручками изменения размера
+        bounds = self._selection_bounds()
+        if bounds is not None:
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(bounds)
+            half = config.SELECTION_HANDLE_SIZE / 2
+            painter.setPen(QPen(accent, 1, Qt.SolidLine))
+            painter.setBrush(QColor("#ffffff"))
+            for pt in self._handle_points(bounds).values():
+                painter.drawRect(QRectF(pt.x() - half, pt.y() - half, 2 * half, 2 * half))
 
     @staticmethod
     def _draw_stroke(painter: QPainter, stroke: Stroke) -> None:

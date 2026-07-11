@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QFontMetricsF,
     QPainterPath,
     QPen,
+    QRadialGradient,
     QTransform,
 )
 
@@ -44,6 +45,14 @@ GOLD_TEXT = "#ead9b5"     # --foreground
 GOLD_PRIMARY = GOLD
 GOLD_HIGHLIGHT = GOLD_BRIGHT
 PARCHMENT_BG = PARCHMENT
+
+# --- Полу-прозрачная заливка внутри рамки (для читаемости текста) ---
+FILL_BROWN = "#241608"    # тёмно-коричневый фон панели под текстом
+FILL_ALPHA = 0.82         # базовая непрозрачность заливки (читается и на тёмном фоне)
+# «Фонарик»: тёплая подсветка у курсора — осветляет фон совсем немного
+GLOW_TINT = "#c79a5a"     # цвет света
+GLOW_ALPHA = 0.15         # пиковая непрозрачность подсветки (в центре)
+GLOW_RADIUS = 130.0       # радиус пятна света, px
 
 # --- Анимационные константы ---
 DRAW_DURATION = 1.6       # с — длительность прорисовки одного штриха
@@ -317,8 +326,52 @@ def _breathe_opacity(elapsed: float | None) -> float:
     return 0.75 + 0.25 * (0.5 - 0.5 * math.cos(phase * 2 * math.pi))
 
 
-def _draw_frame(painter, base_paths, viewbox, splats, sparkles, dst: QRectF,
-                elapsed: float | None, amp: float) -> None:
+# Индексы штрихов рамки, образующих её основной замкнутый контур:
+# верхняя кромка, правая сторона, нижняя кромка, левая сторона (см. *_D выше —
+# порядок одинаков для большой и малой рамки). Нижнюю и левую разворачиваем,
+# чтобы контур шёл единым обходом по часовой стрелке.
+_FILL_BOUNDARY = (0, 3, 1, 2)
+
+
+def _frame_fill_path(paths) -> QPainterPath:
+    """Замкнутый путь, повторяющий волнистую форму обводки — по нему рисуется
+    заливка, чтобы она идеально вписывалась в рамку, а не была прямоугольником.
+    Строится из тех же искажённых `paths`, поэтому граница совпадает с обводкой."""
+    top, right, bottom, left = (paths[i] for i in _FILL_BOUNDARY)
+    path = QPainterPath()
+    path.addPath(top)                      # верх: слева → направо
+    path.connectPath(right)                # правая сторона: сверху → вниз
+    path.connectPath(bottom.toReversed())  # низ: справа → налево
+    path.connectPath(left.toReversed())    # левая сторона: снизу → вверх
+    path.closeSubpath()
+    return path
+
+
+def _draw_fill(painter, path: QPainterPath, mouse_pos, glow: float, intro: float) -> None:
+    """Тёмно-коричневая полупрозрачная заливка + тёплая подсветка-«фонарик» у курсора."""
+    painter.save()
+    painter.setPen(Qt.NoPen)
+    base = QColor(FILL_BROWN)
+    base.setAlphaF(FILL_ALPHA * intro)
+    painter.fillPath(path, base)
+    # «фонарик»: мягкое радиальное осветление у позиции мыши, обрезанное рамкой
+    if mouse_pos is not None and glow > 0.01:
+        painter.setClipPath(path)
+        grad = QRadialGradient(QPointF(mouse_pos), GLOW_RADIUS)
+        c0 = QColor(GLOW_TINT)
+        c0.setAlphaF(GLOW_ALPHA * glow * intro)
+        c1 = QColor(GLOW_TINT)
+        c1.setAlphaF(0.0)
+        grad.setColorAt(0.0, c0)
+        grad.setColorAt(1.0, c1)
+        painter.setBrush(grad)
+        painter.drawPath(path)
+    painter.restore()
+
+
+def _draw_frame(painter, base_paths, viewbox, box, splats, sparkles, dst: QRectF,
+                elapsed: float | None, amp: float,
+                mouse_pos=None, glow: float = 0.0) -> None:
     paths = _prepare("frame" + str(id(base_paths)), base_paths, viewbox, dst, True, amp)
     transform = _stretch_transform(viewbox, dst)
     scale = min(dst.width() / viewbox[2], dst.height() / viewbox[3])
@@ -327,9 +380,13 @@ def _draw_frame(painter, base_paths, viewbox, splats, sparkles, dst: QRectF,
     all_drawn = all(p >= 0.999 for p in progresses)
     breathe = _breathe_opacity(elapsed) if all_drawn else 1.0
 
-    # тень туши (широкий бледный штрих) + основной штрих
-    _stroke(painter, paths, progresses, _pen(GOLD, 4.4, 0.14 * breathe))
-    _stroke(painter, paths, progresses, _pen(GOLD, 1.8, 0.9 * breathe))
+    # заливка по форме обводки — проявляется вместе с прорисовкой рамки
+    intro = 1.0 if elapsed is None else max(0.0, min(1.0, elapsed / DRAW_DURATION))
+    _draw_fill(painter, _frame_fill_path(paths), mouse_pos, glow, intro)
+
+    # тень туши (широкий бледный штрих) + основной штрих (полностью непрозрачный)
+    _stroke(painter, paths, progresses, _pen(GOLD, 4.4, 0.18 * breathe))
+    _stroke(painter, paths, progresses, _pen(GOLD, 1.8, 1.0))
 
     # брызги проявляются после того, как рамка прорисована
     splat_pop = 1.0 if all_drawn else 0.0
@@ -343,14 +400,18 @@ def _draw_frame(painter, base_paths, viewbox, splats, sparkles, dst: QRectF,
             draw_sparkle(painter, center, 5.0, phase)
 
 
-def draw_frame_large(painter, dst: QRectF, elapsed: float | None) -> None:
-    _draw_frame(painter, _FRAME_LARGE_PATHS, _FRAME_LARGE_VIEWBOX, _FRAME_LARGE_SPLATS,
-                _FRAME_LARGE_SPARKLES, dst, elapsed, amp=2.2)
+def draw_frame_large(painter, dst: QRectF, elapsed: float | None,
+                     mouse_pos=None, glow: float = 0.0) -> None:
+    _draw_frame(painter, _FRAME_LARGE_PATHS, _FRAME_LARGE_VIEWBOX, _FRAME_LARGE_BOX,
+                _FRAME_LARGE_SPLATS, _FRAME_LARGE_SPARKLES, dst, elapsed, amp=2.2,
+                mouse_pos=mouse_pos, glow=glow)
 
 
-def draw_frame_small(painter, dst: QRectF, elapsed: float | None) -> None:
-    _draw_frame(painter, _FRAME_SMALL_PATHS, _FRAME_SMALL_VIEWBOX, _FRAME_SMALL_SPLATS,
-                _FRAME_SMALL_SPARKLES, dst, elapsed, amp=1.8)
+def draw_frame_small(painter, dst: QRectF, elapsed: float | None,
+                     mouse_pos=None, glow: float = 0.0) -> None:
+    _draw_frame(painter, _FRAME_SMALL_PATHS, _FRAME_SMALL_VIEWBOX, _FRAME_SMALL_BOX,
+                _FRAME_SMALL_SPLATS, _FRAME_SMALL_SPARKLES, dst, elapsed, amp=1.8,
+                mouse_pos=mouse_pos, glow=glow)
 
 
 def draw_flourish(painter, dst: QRectF, progress: float, color_hex: str = GOLD_BRIGHT) -> None:

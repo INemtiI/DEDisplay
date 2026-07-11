@@ -37,6 +37,7 @@ PAGE_PREFIX = "page_"  # page_1 .. page_N
 
 GROUP_GLOBAL = "Глобальные"
 GROUP_LOCAL = "Инструменты и цвета"
+GROUP_EDIT = "Выделение и буфер обмена"
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,9 @@ LOCAL_ACTIONS: list[Action] = [
     Action("color_white", "Цвет: белый", GROUP_LOCAL, False, "W"),
     Action("clear_page", "Очистить страницу", GROUP_LOCAL, False, "Ctrl+E"),
     Action("exit_draw_mode", "Выйти из рисования", GROUP_LOCAL, False, "Esc"),
+    Action("delete_selection", "Удалить выделенное", GROUP_EDIT, False, "Delete"),
+    Action("copy", "Копировать выделенное", GROUP_EDIT, False, "Ctrl+C"),
+    Action("paste", "Вставить", GROUP_EDIT, False, "Ctrl+V"),
 ]
 
 _BY_ID: dict[str, Action] = {a.id: a for a in (*GLOBAL_ACTIONS, *LOCAL_ACTIONS)}

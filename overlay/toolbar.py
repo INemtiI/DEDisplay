@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import time
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QSlider, QWidget
 
 from . import calligraphy, config
@@ -132,6 +133,8 @@ class Toolbar(QWidget):
     brush_width_changed = Signal(float)
     undo_requested = Signal()
     redo_requested = Signal()
+    copy_requested = Signal()
+    paste_requested = Signal()
     clear_page_requested = Signal()
     add_page_requested = Signal()
     toggle_draw_mode_requested = Signal()
@@ -148,13 +151,37 @@ class Toolbar(QWidget):
         self._separators: list[InkSeparator] = []
         self._drag_offset = None
         self._anim_start = time.monotonic()
+        self._glow = 0.0                 # текущая яркость «фонарика» 0..1
+        self._mouse_local = None         # позиция курсора в координатах панели
 
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)
-        self._anim_timer.timeout.connect(self.update)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
 
         self._build_ui()
         self._position()
+
+    # Активная зона «приближения» курсора вокруг панели (px).
+    _GLOW_MARGIN = 70
+
+    def _on_anim_tick(self) -> None:
+        self._update_glow()
+        self.update()
+
+    def _update_glow(self) -> None:
+        local = self.mapFromGlobal(QCursor.pos())
+        self._mouse_local = QPointF(local)
+        r = self.rect()
+        if r.contains(local):
+            target = 1.0
+        else:
+            dx = max(r.left() - local.x(), 0, local.x() - r.right())
+            dy = max(r.top() - local.y(), 0, local.y() - r.bottom())
+            dist = math.hypot(dx, dy)
+            target = max(0.0, 1.0 - dist / self._GLOW_MARGIN)
+        self._glow += (target - self._glow) * 0.18
+        if abs(target - self._glow) < 0.004:
+            self._glow = target
 
     def _add_separator(self, layout) -> None:
         sep = InkSeparator()
@@ -219,6 +246,22 @@ class Toolbar(QWidget):
         self.redo_btn.clicked.connect(self.redo_requested)
         self._ornate_buttons.append(self.redo_btn)
         layout.addWidget(self.redo_btn)
+
+        self._add_separator(layout)
+
+        self.copy_btn = OrnateButton("⧉", tier="mini")
+        self.copy_btn.setToolTip("Копировать выделенное (Ctrl+C)")
+        self.copy_btn.setEnabled(False)
+        self.copy_btn.clicked.connect(self.copy_requested)
+        self._ornate_buttons.append(self.copy_btn)
+        layout.addWidget(self.copy_btn)
+
+        self.paste_btn = OrnateButton("⧈", tier="mini")
+        self.paste_btn.setToolTip("Вставить (Ctrl+V)")
+        self.paste_btn.setEnabled(False)
+        self.paste_btn.clicked.connect(self.paste_requested)
+        self._ornate_buttons.append(self.paste_btn)
+        layout.addWidget(self.paste_btn)
 
         self._add_separator(layout)
 
@@ -318,9 +361,10 @@ class Toolbar(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
         if self._style == config.STYLE_CALLIGRAPHY:
-            # фон прозрачный — рисуем только золотую рамку и орнамент
+            # полупрозрачная тёмно-коричневая заливка внутри рамки + золотой орнамент
             elapsed = time.monotonic() - self._anim_start
-            calligraphy.draw_frame_large(painter, rect.adjusted(2, 2, -2, -2), elapsed)
+            calligraphy.draw_frame_large(painter, rect.adjusted(2, 2, -2, -2), elapsed,
+                                         mouse_pos=self._mouse_local, glow=self._glow)
         else:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(28, 28, 32, 220))
@@ -365,3 +409,9 @@ class Toolbar(QWidget):
     def set_history_state(self, can_undo: bool, can_redo: bool) -> None:
         self.undo_btn.setEnabled(can_undo)
         self.redo_btn.setEnabled(can_redo)
+
+    def set_copy_enabled(self, enabled: bool) -> None:
+        self.copy_btn.setEnabled(enabled)
+
+    def set_paste_enabled(self, enabled: bool) -> None:
+        self.paste_btn.setEnabled(enabled)

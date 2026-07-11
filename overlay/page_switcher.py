@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import time
 
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
 from . import calligraphy, config
@@ -29,10 +30,12 @@ class PageSwitcher(QWidget):
         self._drag_offset = None
         self._user_positioned = False
         self._anim_start = time.monotonic()
+        self._glow = 0.0                 # текущая яркость «фонарика» 0..1
+        self._mouse_local = None         # позиция курсора в координатах панели
 
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(33)
-        self._anim_timer.timeout.connect(self.update)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
 
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(*_CLASSIC_MARGINS)
@@ -114,6 +117,28 @@ class PageSwitcher(QWidget):
         )
         self._layout.setContentsMargins(mx, my, mx, my)
 
+    # Активная зона «приближения» курсора вокруг панели (px).
+    _GLOW_MARGIN = 60
+
+    def _on_anim_tick(self) -> None:
+        self._update_glow()
+        self.update()
+
+    def _update_glow(self) -> None:
+        local = self.mapFromGlobal(QCursor.pos())
+        self._mouse_local = QPointF(local)
+        r = self.rect()
+        if r.contains(local):
+            target = 1.0
+        else:
+            dx = max(r.left() - local.x(), 0, local.x() - r.right())
+            dy = max(r.top() - local.y(), 0, local.y() - r.bottom())
+            dist = math.hypot(dx, dy)
+            target = max(0.0, 1.0 - dist / self._GLOW_MARGIN)
+        self._glow += (target - self._glow) * 0.18
+        if abs(target - self._glow) < 0.004:
+            self._glow = target
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._style == config.STYLE_CALLIGRAPHY:
@@ -124,9 +149,10 @@ class PageSwitcher(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
         if self._style == config.STYLE_CALLIGRAPHY:
-            # фон прозрачный — рисуем только золотую рамку и орнамент
+            # полупрозрачная тёмно-коричневая заливка внутри рамки + золотой орнамент
             elapsed = time.monotonic() - self._anim_start
-            calligraphy.draw_frame_small(painter, rect.adjusted(2, 2, -2, -2), elapsed)
+            calligraphy.draw_frame_small(painter, rect.adjusted(2, 2, -2, -2), elapsed,
+                                         mouse_pos=self._mouse_local, glow=self._glow)
         else:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(28, 28, 32, 220))

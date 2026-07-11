@@ -75,6 +75,8 @@ def main() -> None:
     toolbar.brush_width_changed.connect(canvas.set_brush_width)
     toolbar.undo_requested.connect(canvas.undo)
     toolbar.redo_requested.connect(canvas.redo)
+    toolbar.copy_requested.connect(canvas.copy_selection)
+    toolbar.paste_requested.connect(canvas.paste_clipboard)
     toolbar.clear_page_requested.connect(canvas.clear_page)
     toolbar.toggle_draw_mode_requested.connect(canvas.toggle_draw_mode)
     toolbar.add_page_requested.connect(add_page)
@@ -85,6 +87,8 @@ def main() -> None:
     canvas.draw_mode_changed.connect(toolbar.set_draw_mode)
     canvas.draw_mode_changed.connect(tray.set_draw_mode)
     canvas.history_changed.connect(toolbar.set_history_state)
+    canvas.selection_changed.connect(toolbar.set_copy_enabled)
+    canvas.clipboard_changed.connect(toolbar.set_paste_enabled)
 
     # --- переключатель страниц ---
     page_switcher.page_selected.connect(go_to_page)
