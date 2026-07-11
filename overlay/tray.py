@@ -7,6 +7,9 @@ from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPen, 
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from . import config
+from .resources import resource_path
+
+ICON_FILE = "icon.png"
 
 
 class TrayIcon(QSystemTrayIcon):
@@ -71,6 +74,15 @@ class TrayIcon(QSystemTrayIcon):
 
     @staticmethod
     def _make_icon() -> QIcon:
+        icon_path = resource_path(ICON_FILE)
+        if icon_path.exists():
+            icon = QIcon(str(icon_path))
+            if not icon.isNull():
+                return icon
+        return TrayIcon._fallback_icon()
+
+    @staticmethod
+    def _fallback_icon() -> QIcon:
         pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)

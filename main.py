@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from overlay import keymap, style_prefs
+from overlay.resources import resource_path
 from overlay.canvas import OverlayCanvas
 from overlay.hotkeys import HotkeyManager
 from overlay.page_switcher import PageSwitcher
@@ -19,6 +21,10 @@ from overlay.tray import TrayIcon
 def main() -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    icon_path = resource_path("icon.png")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     page_manager = PageManager()
     canvas = OverlayCanvas(page_manager)
